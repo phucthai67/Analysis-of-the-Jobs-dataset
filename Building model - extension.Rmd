@@ -1,0 +1,371 @@
+---
+title: "Assignment 3 Question 1"
+author: "Nguyen Phuc Thai"
+date: "`r Sys.Date()`"
+output: bookdown::pdf_document2
+fig_caption: yes
+fontsize: 12 pt
+geometry: margin=2.3cm
+header-includes:
+  \usepackage{float}
+toc: False
+---
+
+# Loading data, packages and cleaning data
+```{r global-options, include=FALSE}
+library(float)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE,fig.width=7, fig.height=4, fig.align =  'center',fig.pos = 'H')
+```
+
+```{r}
+##loading packages 
+pacman::p_load(tidyverse, tidymodels,skimr,textrecipes, stopwords)
+```
+
+
+
+```{r}
+
+
+## loading data
+setwd("G:/My Drive/Adelaide uni/Stats7022/Assignment 3")
+jobs<-readRDS('jobs.rds')
+
+## separating the dataset containing only variable of interest
+## also removing jobs with no annual salary as we cannot train
+##model using data with no response
+jobs2=jobs%>%select(state,job_type,sector,annual_salary,salary)%>%
+  filter(!is.na(annual_salary))
+```
+
+The data will be processed in a similar fashion as what has been done in the first model building process
+
+```{r}
+## selecting relevant columns, now include job title and description
+jobs2=jobs%>%
+  select(state,job_type,sector,job_description,job_title,annual_salary,salary)%>%
+  filter(!is.na(annual_salary))
+
+
+## fixing salary values (weekly and hourly)
+jobs_final2=jobs2%>%
+  filter(annual_salary>1000)
+
+jobs_hourly=jobs2%>%
+  filter(annual_salary<=105 & annual_salary>2)
+
+jobs_weekly=jobs2%>%
+  filter(annual_salary>200 & annual_salary<1000)
+
+jobs_hourly$annual_salary=jobs_hourly$annual_salary*1800
+jobs_weekly$annual_salary=jobs_weekly$annual_salary*52
+
+##combining the fixed data with the whole data
+jobs_final2=rbind(jobs_hourly,jobs_weekly,jobs_final2)
+
+
+## replacing missing value with level "Other"
+jobs_final2=jobs_final2%>%
+  select(-salary)%>%
+  mutate(sector=as.factor(replace_na(sector,'Other')),
+         state=as.factor(replace_na(state,'Other')),
+         job_type=as.factor(job_type))
+
+## lumping infrequent factor levels
+jobs_final2=jobs_final2%>%
+  mutate(sector=fct_lump_prop(sector,0.01),
+         state=fct_lump_prop(state,0.01),
+         job_type=fct_lump_prop(job_type,0.01),
+         annual_salary=log(annual_salary))
+```
+
+In the new preprocessing steps, tokenization of the jobs description and jobs title will be included. However, in my analysis, I found that the description seems to be more useful that title, so I will have separate preprocessing to demonstrate this point.
+
+
+```{r}
+## data spliting 
+set.seed(2023)
+jobs_split <- initial_split(jobs_final2, strata = annual_salary,
+                            prop=0.8)
+jobs_train <- training(jobs_split)
+jobs_test <- testing(jobs_split)
+
+## this recipe does not use the title column
+jobs_recipe_no_title <- recipe(annual_salary ~ .,
+                      data = jobs_train) %>%
+  step_rm(job_title)%>%
+  step_tokenize(job_description) %>%## tokenizing words
+  step_stopwords(job_description) %>%
+  ## removing words that should appear a lot but is
+  #not informative (e.g:'the','a', and others like that)
+  step_tokenfilter(job_description,
+                   max_tokens = 40) %>%
+  ## keep only 40 most frequent ones
+  step_tfidf(job_description)%>%
+  step_normalize(all_numeric_predictors())
+
+
+# same as above but with title columns
+jobs_recipe_with_title <- recipe(annual_salary ~ .,
+                               data = jobs_train) %>%
+  step_tokenize(job_description,job_title) %>%
+  step_stopwords(job_description,job_title) %>%
+  step_tokenfilter(job_description,max_tokens = 40) %>%
+  step_tokenfilter(job_title,max_tokens =20)%>%
+  step_tfidf(job_description,job_title)%>%
+  step_normalize(all_numeric_predictors())
+```
+
+
+# Tuning models
+
+Models and folds
+```{r}
+## the model
+rf_model <- rand_forest(mtry = tune(),
+                        min_n = tune(),
+                        trees = 500) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+## folds
+folds <- vfold_cv(jobs_train, v = 5, strata = annual_salary)
+```
+
+
+
+```{r}
+## calculating maximum number of predictors for each recipe
+predictors_with_title=ncol(jobs_recipe_with_title%>%prep()%>%bake(new_data=NULL))-1
+predictors_no_title=ncol(jobs_recipe_no_title%>%prep()%>%bake(new_data=NULL))-1
+
+#tuning grid without title columns
+rf_grid_no_title <- grid_regular(mtry(c(10,predictors_no_title)),
+                        min_n(),
+                        levels=5)
+
+# tuning grid with title columns
+rf_grid_with_title <- grid_regular(mtry(c(10,predictors_with_title)),
+                                 min_n(),
+                                 levels=5)
+rf_wf_with_title=workflow()%>%
+  add_model(rf_model)%>%
+  add_recipe(jobs_recipe_with_title)
+rf_wf_no_title=workflow()%>%
+  add_model(rf_model)%>%
+  add_recipe(jobs_recipe_no_title)
+```
+
+## tuning for model with title column
+```{r, eval=FALSE}
+### I set eval=FALSE since this takes a while to run
+##and I already saved the result I got and just loaded it back
+
+
+doParallel::registerDoParallel()
+rf_tune_with_title <- tune_grid(rf_wf_with_title,
+                     resamples = folds,
+                     grid = rf_grid_with_title)
+```
+
+
+The outcome of the tuning process looks as follow 
+
+```{r,  fig.cap="\\label{fig:tuneresult1} Tuning plots for recipe with job title"}
+rf_tune_with_title=readRDS('rf_tune_with_title.rds')
+rf_tune_with_title%>%autoplot()
+```
+
+
+The best model seems to use 10 predictors to build each tree, right at the edge point, so some more tuning is done to see if smaller number of predictor at each split improves the model. The same can be said for minimum node size, but, 2 is already the minimum value possible.
+
+```{r}
+
+rf_grid_with_title_2 <- grid_regular(mtry(c(1,10)),
+                                    min_n(),
+                                    levels=3)
+rf_wf_with_title_2=workflow()%>%
+  add_model(rf_model)%>%
+  add_recipe(jobs_recipe_with_title)
+```
+
+```{r, eval=F}
+
+## same as before, this code chunk did not run when I compile 
+#this file, you have to change it in the RMD file if
+#you want to run the code or download the tuning result
+
+doParallel::registerDoParallel()
+rf_tune_with_title_2 <- tune_grid(rf_wf_with_title_2,
+                                resamples = folds,
+                                grid = rf_grid_with_title_2)
+```
+
+```{r,  fig.cap="\\label{fig:tuneresult2} Tuning plots for recipe with job title with smaller mtry"}
+rf_tune_with_title_2=readRDS('rf_tune_with_title_2.rds')
+rf_tune_with_title_2%>%autoplot()
+```
+
+10 seems to be the optimal value so I can stop tuning
+
+## for the model without title
+```{r, eval=F}
+
+##this code chunk was not run as well
+
+
+doParallel::registerDoParallel()
+rf_tune_no_title <- tune_grid(rf_wf_no_title,
+                                resamples = folds,
+                                grid = rf_grid_no_title)
+```
+
+```{r,  fig.cap="\\label{fig:tuneresult3} Tuning plots for recipe with no job title "}
+rf_tune_no_title=readRDS('rf_tune_no_title.rds')
+rf_tune_no_title%>%autoplot()
+```
+
+Same with the other case, the best model seems to use 10 predictors to build each tree, right at the edge point, so some more tuning is done to see if smaller number of predictor at each split improves the model. The same can be said for minimum node size, but, 2 is already the minimum value possible.
+
+
+```{r}
+
+rf_grid_no_title_2 <- grid_regular(mtry(c(1,10)),
+                                    min_n(),
+                                    levels=3)
+rf_wf_no_title_2=workflow()%>%
+  add_model(rf_model)%>%
+  add_recipe(jobs_recipe_no_title)
+```
+
+```{r, eval=F}
+
+## same as before, this code chunk did not run 
+
+doParallel::registerDoParallel()
+rf_tune_no_title_2 <- tune_grid(rf_wf_no_title_2,
+                                resamples = folds,
+                                grid = rf_grid_no_title_2)
+```
+
+```{r,  fig.cap="\\label{fig:tuneresult2} Tuning plots for recipe with job title with smaller mtry"}
+rf_tune_no_title_2=readRDS('rf_tune_no_title_2.rds')
+rf_tune_no_title_2%>%autoplot()
+```
+
+10 seems to be the optimal value so I can stop tuning
+
+
+## Performance on the test set for both models
+
+With job titles:
+```{r}
+## finalize the workflow with the best model from tuning
+rf_wf_with_title_2 <- rf_wf_with_title_2 %>%
+  finalize_workflow(select_best(rf_tune_with_title_2, metric = "rsq"))
+
+## fitting the model again on all training data and use the model on
+#the test data
+jobs_fit_rf_with_title <- rf_wf_with_title_2 %>% last_fit(split = jobs_split)
+
+## final model performance
+jobs_fit_rf_with_title %>% collect_metrics()
+```
+
+
+
+Without job titles
+```{r}
+
+rf_wf_no_title_2 <- rf_wf_no_title_2 %>%
+  finalize_workflow(select_best(rf_tune_no_title_2, metric = "rsq"))
+
+## fitting the model again on all training data and use the model on
+#the test data
+jobs_fit_rf_no_title <- rf_wf_no_title_2 %>% last_fit(split = jobs_split)
+
+## final model performance
+jobs_fit_rf_no_title %>% collect_metrics()
+```
+
+
+So both model perform relatively close to each other. As a result, for random forest, having no job title column should be used for a simpler model.
+
+## final remarks
+
+Compared to the model without the job description columns, this model performs considerably better, with more than doubled the R square of the other model. However, it's performance metrics remain relatively bad to be used.
+
+
+# Appendix
+
+I also fitted 2 models to compare with random forest. Both model only utitlize the recipe with no job title columns
+
+## Ridge regression
+```{r}
+# model
+ridge_regression_model=linear_reg(
+  mode='regression',mixture = 1,penalty = tune()
+)%>%
+  set_engine('glmnet')
+
+## adding dummyfication step because random forest could 
+##categorical variables without this step
+jobs_recipe_no_title=jobs_recipe_no_title%>%
+  step_dummy(all_nominal_predictors())
+
+#workflow
+ridge_wf=workflow()%>%
+  add_model(ridge_regression_model)%>%
+  add_recipe(jobs_recipe_no_title)
+
+##tuning
+my_grid <- tibble(penalty = seq(0.0001,1000,length.out=100))
+doParallel::registerDoParallel()
+ridge_tune<- tune_grid(ridge_wf,
+                       resamples = folds,
+                       grid = my_grid)
+
+## tuning result
+ridge_tune%>%autoplot()
+
+
+#on the test set
+ridge_wf=ridge_wf %>%
+  finalize_workflow(select_best(ridge_tune, metric = "rsq"))
+ridge_final_fit <- ridge_wf %>% last_fit(split = jobs_split)
+
+## final model performance
+ridge_final_fit %>% collect_metrics()
+
+
+
+```
+
+##KNN
+```{r, cache=T}
+# model
+knn_model<-nearest_neighbor( mode = "regression", 
+                             neighbors = tune())%>%
+  set_engine('kknn')
+#workflow
+wf3=workflow()%>%
+  add_model(knn_model)%>%
+  add_recipe(jobs_recipe_no_title)
+## tuning
+knn_grid <- tibble(neighbors = seq(1,100,1))
+knn_tune<- tune_grid(wf3,
+                       resamples = folds,
+                       grid = knn_grid)
+
+##plotting tuning result
+knn_tune%>%autoplot()
+wf3 <- wf3 %>%
+  finalize_workflow(select_best(knn_tune, metric = "rsq"))
+
+## on the test data
+knn_fit <- wf3 %>% last_fit(split = jobs_split)
+
+## final model performance
+knn_fit %>% collect_metrics()
+```
+
+Neither model could outperform random forest

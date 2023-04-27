@@ -45,9 +45,7 @@ There are 8 jobs with annual salary that is 1.5 or lower. These values seem so e
 There are 64 jobs with annual salary disclosed to be between $9 and \$105, these are treated mistyped hourly payments and hence will be re-cleaned accordingly. Similarly, there are 2 jobs with annual salary 624 and 775, respectively, which seems like weekly payment and will be fixed accordingly.
 
 Jobs with unusually high salary will be kept (56 have salary of more than $1 million per year, a few even exceed \$100 million (damnnn! sorry but can't help myself)). It is more likely to have exceedingly high-paid jobs than extremely low ones because of minimum wage laws. Hence, these values will be kept despite their may be error in them, as they may need to be inspected one by one to to verify whether they are wrong or not.
-```{r}
-skim_without_charts(jobs1)
-```
+
 
 ```{r, cache=T}
 ## filter out all seemingly correct jobs
@@ -89,7 +87,8 @@ jobs_final=jobs_final%>%
 jobs_final=jobs_final%>%
   mutate(sector=fct_lump_prop(sector,0.01),
          state=fct_lump_prop(state,0.01),
-         job_type=fct_lump_prop(job_type,0.01))
+         job_type=fct_lump_prop(job_type,0.01),
+         annual_salary=log(annual_salary))
 ```
 
 
@@ -143,7 +142,7 @@ wf_model=workflow()%>%
   add_recipe(recipe_rf)
 ```
 
-```{r, cache=T}
+```{r }
 ## parameter tunnnig
 doParallel::registerDoParallel()
 rf_tune <- tune_grid(wf_model,
