@@ -1,0 +1,272 @@
+---
+title: "Assignment 2 Question 1"
+author: "Nguyen Phuc Thai"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# Importing the cleaned data and libraries
+
+```{r}
+# the Working directory where I save the dataset
+setwd("G:/My Drive/Adelaide uni/Stats7022/Assignment 2")
+
+
+# library and the dataset
+pacman::p_load(tidyverse,skimr,forcats,purrr,inspectdf,kableExtra)
+jobs<-readRDS('jobs_clean.rds')
+```
+
+
+# Preprocessing
+
+## Calculating annual salary
+
+As many salary information given in the salary columns are pay range in both weekly and annual payment, they will be extracted as follow:
+
+```{r}
+# store in a new dataset processed salary information
+jobs1=jobs %>%
+  select(salary)%>% 
+  mutate(salary=str_replace_all(salary,',',''))%>%
+  ## remove all comma in numbers so the number can be converted to numeric data
+  mutate(pay_range = map(str_extract_all(salary, '\\d+([.,]\\d+)?')
+                         , as.numeric))
+## extract all numbers, pay range for each job post will now be store
+# as a vector of 2 values, exact pay is vector of length one, so the 
+#column pay_range is effectively a list
+
+
+
+pay_range=jobs1$pay_range  # store pay range in a separate list
+
+idx <- (sapply(pay_range, length)) 
+#storing vector length in a vector
+
+pay_range[idx==0] <- NA 
+# using vector of length to identify jobs without payment information
+```
+
+After extracting numeric payment from the salary columns, the hourly pay and annual salary for jobs with payment information disclosed will be extracted as follow
+
+```{r}
+## initialising vectors that contains value to be used for calculations
+min_hourly_wage=rep(NA,nrow(jobs))
+max_hourly_wage=rep(NA,nrow(jobs))
+min_yearly_salary=rep(NA,nrow(jobs))
+max_yearly_salary=rep(NA,nrow(jobs))
+
+## To get the min hourly wage, find values in the salary columns that contains "hour"
+##and is not NA in the pay range vector
+min_hourly_wage[str_detect(jobs$salary,'hour') & !is.na(pay_range)]=
+  unlist(map(pay_range[str_detect(jobs$salary,'hour') & !is.na(pay_range)],1))
+
+
+## To get the max hourly wage, find values in the salary columns that contains "hour" 
+##and is not NA in the pay range vector and are vector containing more than 1 value
+max_hourly_wage[str_detect(jobs$salary,'hour') & !is.na(pay_range)
+                & sapply(pay_range,length)>1]=
+  unlist(map(pay_range[str_detect(jobs$salary,'hour') & !is.na(pay_range)&
+                         sapply(pay_range,length)>1],2))
+
+
+## To get the min yearly wage, find values in the salary columns that contains "year" 
+##and is not NA in the pay range vector
+min_yearly_salary[str_detect(jobs$salary,'year') & !is.na(pay_range)]=
+  unlist(map(pay_range[str_detect(jobs$salary,'year') & !is.na(pay_range)],1))
+
+
+
+## To get the max yearly wage, find values in the salary columns that contains "year" 
+##and is not NA in the pay range vector and are vector containing more than 1 value
+max_yearly_salary[str_detect(jobs$salary,'year') & !is.na(pay_range)& 
+                    sapply(pay_range,length)>1]=
+  unlist(map(pay_range[str_detect(jobs$salary,'year')
+                       & !is.na(pay_range)& sapply(pay_range,length)>1],2))
+```
+
+
+After that a single annual payment is calculated for all jobs with payment information (for jobs with annual pay range, the mean is used, same with hourly pay, and all hourly pay is multiplied by 1800 to get the annual payment)
+
+```{r}
+
+## putting all payment information to a new dataframe
+Salary=data.frame(min_hourly_wage=min_hourly_wage,
+                  max_hourly_wage=max_hourly_wage,
+                  min_yearly_salary=min_yearly_salary,
+                  max_yearly_salary=max_yearly_salary)
+
+
+
+## calculating a single annual salary (for jobs that already satisfy 
+#this, this function will just give the mean of a single value)
+Salary$yearly_wage=rowMeans(Salary[,c("min_yearly_salary","max_yearly_salary")],
+                            na.rm = T)
+
+## doing the same thing for hourly pay, but not multiply by 1800
+Salary$hourly_salary=rowMeans(Salary[,c('min_hourly_wage','max_hourly_wage')],
+                              na.rm=T)
+
+## replace NaN by NA in the data frame
+Salary <- Salary %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+## calculating yearly payment for jobs with only hourly pay disclosed
+Salary$yearly_wage[is.na(Salary$yearly_wage)]=Salary$hourly_salary[is.na(Salary$yearly_wage)]*1800
+```
+
+
+Then we can add this column to the jobs dataset
+
+```{r}
+jobs$anual_salary=Salary$yearly_wage
+```
+
+some non missing value from this column now looks like this
+```{r}
+head(jobs%>%
+  select(anual_salary)%>%
+  filter(!is.na(anual_salary)))
+```
+
+
+
+## Extracting the State from the jobs dataset
+
+**Some cleaning before extracting**
+
+Some location data was misplaced in the organization columns as follow
+
+```{r}
+## extracting unique value in both, aside from NA
+unique_location=unique(jobs$location)
+unique_location=unique_location[!is.na(unique_location)]
+unique_organzation=unique(jobs$organization)
+unique_organzation=unique_organzation[!is.na(unique_organzation)]
+
+
+mistype2<-head(jobs%>%
+select(location,organization)%>%
+filter(organization %in% unique_location))
+```
+
+
+```{r tab4, echo=F}
+knitr::kable(mistype2, caption = "mistyped location-organization")%>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
+To fix this issue, if a row is found to have value organization values that can also be found in all unique location values, the value organization and location will be swapped for that row. The swap is done based on the organization row because during checking location values that can be found in organization columns, the location values checked are actual location.
+
+
+
+This swap is imperfect, as if there is a location that only appear once in the dataset, and it appears in the organization columns, the swap will not be made, and also vice versa. So further checking may be required.  
+
+```{r}
+jobs[jobs$organization %in% unique_location, c("organization", "location")] <- 
+  jobs[jobs$organization %in% unique_location, c( "location",'organization')] 
+```
+
+
+Additionally,  a few job types was mistyped into the column location and organization, which are shown below:
+
+```{r}
+mistyped<-jobs%>%
+       select(job_type,location,organization)%>%
+       filter(organization=='Full Time Employee'|location=='Full Time Employee')
+```
+
+
+```{r tab3, echo=F}
+knitr::kable(mistyped, caption = "mistyped job types")%>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+
+```
+
+The observations in table \ref{tab:tab3} will be moved to the correct columns, and the mistyped row will be replaced as missing value in the location and organization columns as follow
+
+```{r}
+jobs[jobs$location=='Full Time Employee',]$job_type='Full Time Employee'
+jobs[jobs$location=='Full Time Employee',]$location=NA
+jobs[jobs$organization=='Full Time Employee'& 
+           !is.na(jobs$organization),]$organization=NA
+```
+
+And some job description was also found in this column
+
+```{r}
+print(jobs[str_length(jobs$location)>100 & !is.na(jobs$location),]$location[1])
+```
+
+So any location data with more than 100 character will be removed
+
+```{r}
+jobs[str_length(jobs$location)>100 & !is.na(jobs$location),]$location=NA
+```
+
+Some location also have the post code, while others do not. Postcode will also be removed from the data
+
+```{r}
+jobs$location<-str_replace_all(jobs$location, "[:digit:]", "")
+```
+
+
+**Processing the location data**
+
+Since the two-letter abbreviation of the state always come after the comma, and is the last characters of the location, it will be extracted as follow:
+
+```{r}
+## extracting character after the comma
+state <- sub('.*,\\s*','\\1', jobs$location)
+## trim whitespace from the extracted string
+state=trimws(state)
+## anything that is longer than 2 characters will be removed
+state[str_length(state)>2 & !is.na(state)]=NA
+
+
+## Adding state to the dataset
+jobs$state=state
+```
+
+Some values from this column
+
+```{r}
+head(jobs%>%
+  select(state)%>%
+  filter(!is.na(state)))
+```
+
+
+## Simplifying sector column
+
+The column will be lumped so that only the top 20 sectors are kept
+
+```{r}
+## lumping the low-count sectors into others
+jobs$sector=fct_lump(jobs$sector,20)
+```
+
+A summary of this variable:
+
+```{r}
+knitr::kable(summary(jobs$sector), caption = "sector column")%>%
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
+Aside from the 20 most common sectors, we have levels for missing values and all other uncommon sectors.
+
+
+
+# Save the data
+
+```{r}
+filenamepath <- glue::glue("{lubridate::today()}-jobs.csv")
+## the name will be
+filenamepath
+```
+
+```{r}
+##add the working directory before running this,
+##I set my working directory at the start so I don't need it
+write.csv(jobs,filenamepath)
+```
+
